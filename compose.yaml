@@ -1,0 +1,8 @@
+# Local Redis for the bot (Warden's own Redis is not exposed to your machine).
+# Start it with:  docker compose up -d
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
