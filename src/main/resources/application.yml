@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: chat-commerce-bot
+  threads:
+    virtual:
+      enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# Required values have no default on purpose: the app refuses to start until they are set.
+# In IntelliJ: Run > Edit Configurations > Environment variables.
+app:
+  webhook-secret: ${WEBHOOK_SECRET:}
+  storefront-url: ${STOREFRONT_URL:https://magento.test}
+  magento:
+    base-url: ${MAGENTO_BASE_URL:https://magento.test}
+    token: ${MAGENTO_TOKEN:}
+    timeout: 10s
+  infobip:
+    base-url: ${INFOBIP_BASE_URL:}      # e.g. https://xxxxx.api.infobip.com (from your Infobip portal)
+    api-key: ${INFOBIP_API_KEY:}
+    sender: ${INFOBIP_SENDER:}          # your registered WhatsApp sender, digits only
+    timeout: 10s
+  limits:
+    messages-per-minute: 20
