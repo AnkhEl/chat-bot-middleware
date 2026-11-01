@@ -35,9 +35,9 @@ replaces this in the next phase), everyone else gets a "please verify your numbe
 | Part | State |
 |---|---|
 | Webhook, secret check, dedupe, rate limits | Working |
-| `VERIFY` handling and Magento calls over HTTPS | Working (tested end to end with a simulated webhook) |
+| `VERIFY` handling and Magento calls over HTTPS | Working (tested end to end, with simulated webhooks and with real WhatsApp messages) |
 | Replies through Infobip | Working (a real WhatsApp reply was received) |
-| Real inbound messages from Infobip to this app | **Not tested yet.** Needs a public tunnel and one Infobip setting (see below) |
+| Real inbound messages from Infobip to this app | Working (tested on the Infobip sandbox through a Cloudflare tunnel; see below) |
 | Ordering menu, cart, checkout | Not built |
 
 ## Requirements
@@ -151,7 +151,7 @@ curl -i -X POST "http://localhost:8080/webhooks/whatsapp/<YOUR_WEBHOOK_SECRET>" 
   page flipping to *Verified*.
 - A wrong secret returns `401`.
 
-## Receiving real WhatsApp messages (not tested yet)
+## Receiving real WhatsApp messages
 
 Infobip has to reach your app over the internet, so on a laptop you need a tunnel (ngrok, Cloudflare Tunnel, etc.)
 forwarding to port 8080. In the Infobip portal, set the inbound message forwarding for your sender to:
@@ -162,7 +162,25 @@ https://<tunnel-host>/webhooks/whatsapp/<WEBHOOK_SECRET>
 
 Menu names change, so follow Infobip's current WhatsApp "receive messages" documentation. The payload this service
 reads is the `results[]` array with `from`, `messageId` and `message.type = TEXT` / `message.text`. If Infobip's real
-payload differs, `InfobipInbound` is the only class to adjust.
+payload differs, `InfobipInbound` is the only class to adjust. In testing, the real payload matched.
+
+A quick tunnel is the easiest way to test:
+
+```bash
+cloudflared tunnel --url http://localhost:8080
+```
+
+It prints a public `https://...trycloudflare.com` address. It changes every time the tunnel starts, so update the
+Infobip subscription each session, and close the tunnel when you are done.
+
+**Subscription settings that worked:** WhatsApp *inbound messages*, forwarding action **Apply Subscription**, JSON,
+filters left empty, no authentication (the secret in the URL does that job). Do not filter by keyword: the bot has to
+see every message.
+
+**Sandbox quirk, link your phone once:** on the shared Infobip sandbox number, send your account keyword (your Infobip
+username, shown locked in the sender's inbound settings) from your phone first. Infobip replies that your phone is
+connected. Until then nothing reaches the app. Afterwards, normal messages arrive without the keyword. Infobip's docs do
+not describe this; a registered production sender is expected not to need it.
 
 ## What the bot says
 
@@ -211,6 +229,8 @@ src/main/java/com/alex/chatcommercebot
 | `Magento answered HTTP 401` | Wrong token, Integration not activated, its two Phone Verification permissions not ticked, or integration tokens not allowed as bearer tokens in Magento (see the module README). |
 | `Magento answered HTTP 404` | Wrong `MAGENTO_BASE_URL`, or the module is not enabled. |
 | Webhook returns `200` but nothing happens | The `messageId` was already used. Use a new one. |
+| Messages from your phone never arrive, nothing in the console | The sandbox has not linked your phone yet. Send your Infobip account keyword once. |
+| `HttpTimeoutException: Request cancelled` right after a Magento cache flush or module update | Magento was cold and took longer than 10 s. Retry; if it persists, time the call with curl and raise `app.magento.timeout`. |
 | Verification always "invalid or expired" | The code expired (10 minutes), was already used, or the `from` number differs from the one entered on the website. |
 | `Infobip rejected a message (HTTP n)` | Check the API key, base URL and sender. On a trial, the recipient must be a verified test number. |
 | `Could not reach Infobip` | Network or TLS problem towards Infobip. If you set the Windows trust-store options, make sure the Windows certificate list is intact. |
