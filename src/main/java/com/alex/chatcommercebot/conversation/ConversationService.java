@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory;
  * Handles one inbound customer message.
  *
  * <p>Scope so far: phone verification ("VERIFY 482913"), the verified / not-verified gate, and the
- * main menu shown to verified customers, and taps on the menu rows.
+ * main menu shown to verified customers, taps on the menu rows, and the per-customer session.
  *
  * <p>This class deliberately has no Spring imports, so it is unit-tested without a container.
  * It is safe to call twice with the same message id: the second call is ignored.
@@ -39,12 +39,15 @@ public final class ConversationService {
     private final MagentoGateway magento;
     private final MessageSender sender;
     private final KeyValueStore store;
+    private final SessionStore sessions;
     private final Settings settings;
 
-    public ConversationService(MagentoGateway magento, MessageSender sender, KeyValueStore store, Settings settings) {
+    public ConversationService(MagentoGateway magento, MessageSender sender, KeyValueStore store,
+                               SessionStore sessions, Settings settings) {
         this.magento = magento;
         this.sender = sender;
         this.store = store;
+        this.sessions = sessions;
         this.settings = settings;
     }
 
@@ -102,9 +105,11 @@ public final class ConversationService {
 
     private void handleOther(String phone) {
         MagentoGateway.LookupResult customer = verifiedCustomer(phone);
-        if (customer != null) {
-            sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+        if (customer == null) {
+            return;
         }
+        touchSession(phone);
+        sender.sendList(phone, Menu.forCustomer(customer.firstName()));
     }
 
     /** The customer tapped a row of the menu. */
@@ -113,6 +118,8 @@ public final class ConversationService {
         if (customer == null) {
             return;
         }
+
+        Session session = touchSession(phone);
 
         Optional<MenuAction> action = MenuAction.fromId(replyId);
         if (action.isEmpty()) {
@@ -125,9 +132,17 @@ public final class ConversationService {
         log.info("Menu choice {} from {}", action.get(), Redact.phone(phone));
         switch (action.get()) {
             case HELP -> sender.sendText(phone, Messages.HELP);
+            case VIEW_CART -> sender.sendText(phone, Messages.cart(session));
             // The other rows are built in the next steps.
             default -> sender.sendText(phone, Messages.comingSoon(action.get().title()));
         }
+    }
+
+    /** Loads the customer's session and saves it straight back, which restarts its idle timer. */
+    private Session touchSession(String phone) {
+        Session session = sessions.load(phone);
+        sessions.save(phone, session);
+        return session;
     }
 
     /**

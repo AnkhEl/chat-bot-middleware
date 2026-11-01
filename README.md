@@ -6,15 +6,17 @@ Customers message the store's WhatsApp number; this service receives the message
 means, talks to Magento over REST, and replies. Magento stays the single source of truth for customers, products
 and orders. This service only holds short-lived conversation state in Redis.
 
-**Today (phase 1):** customers prove they own their phone number by sending a one-time code, and the bot recognises
-verified customers. **Next:** the ordering menu (browse, search, SKU entry, cart, cash-on-delivery checkout).
+**Today:** customers prove they own their phone number by sending a one-time code, and the bot recognises verified
+customers. A verified customer gets an interactive **menu** (a WhatsApp list), taps are understood, and each customer
+has a short-lived **session** in Redis (state and cart). **Next:** filling the cart (browse, search, SKU entry) and
+cash-on-delivery checkout.
 
 ## How it fits together
 
 ```
 Customer ──WhatsApp──> Infobip ──webhook──> chat-commerce-bot ──REST──> Magento 2
                                                 │   ▲                  (Vendor_PhoneVerification module)
-                                                │   └── Redis: duplicate-message markers, rate limits
+                                                │   └── Redis: duplicate markers, rate limits, customer sessions
                                                 └── reply via Infobip API ──> Customer
 ```
 
@@ -27,8 +29,25 @@ Customer ──WhatsApp──> Infobip ──webhook──> chat-commerce-bot �
    Magento's `POST /rest/V1/phone/verify`.
 5. Magento marks the number verified; the service replies on WhatsApp; the website page flips to *Verified*.
 
-Any other message triggers `GET /rest/V1/phone/lookup`: verified customers get a greeting (the ordering menu
-replaces this in the next phase), everyone else gets a "please verify your number" reply with a link.
+Any other message triggers `GET /rest/V1/phone/lookup`: verified customers get the main menu, everyone else gets a
+"please verify your number" reply with a link.
+
+### Menu and taps
+
+A verified customer who sends anything receives a WhatsApp **list message** with a button (**Open menu**) and six rows:
+Order again, Browse categories, Search products, Enter SKUs, View cart, Help.
+
+When the customer taps a row, Infobip sends a webhook whose message type is `INTERACTIVE_LIST_REPLY` carrying the
+row's id (for example `menu_help`). The bot looks the id up in the `MenuAction` enum and replies. Today **Help** and
+**View cart** are real; the other four say they are not ready yet. A tap from a number that is not verified is treated
+like any message from a stranger, and an id the bot does not know simply shows the menu again.
+
+### Sessions
+
+Each verified customer has a session stored in Redis as JSON under `wa:session:<number>` (state and cart). Every
+interaction restarts a **2-hour idle timer**; after that the customer starts again from the menu. The cart lives in the
+session, not in Magento: nothing is written to Magento until the customer confirms an order. Strangers never get a
+session.
 
 ## Status
 
@@ -38,7 +57,11 @@ replaces this in the next phase), everyone else gets a "please verify your numbe
 | `VERIFY` handling and Magento calls over HTTPS | Working (tested end to end, with simulated webhooks and with real WhatsApp messages) |
 | Replies through Infobip | Working (a real WhatsApp reply was received) |
 | Real inbound messages from Infobip to this app | Working (tested on the Infobip sandbox through a Cloudflare tunnel; see below) |
-| Ordering menu, cart, checkout | Not built |
+| Interactive menu (list message) and tap handling | Working (tested with real WhatsApp messages) |
+| Per-customer session in Redis (state, cart, 2 h idle expiry) | Working. The cart is always empty until the next steps |
+| Help and View cart menu rows | Working |
+| Order again, browse, search, SKU entry | Placeholder replies ("not ready yet") |
+| Cart filling, checkout | Not built |
 
 ## Requirements
 
@@ -59,8 +82,9 @@ docker compose exec redis redis-cli ping    # expect PONG
 ```
 
 Redis here has no password, so keep it reachable from your own machine only. If you are on shared Wi-Fi, change the
-port mapping in `compose.yaml` to `"127.0.0.1:6379:6379"`. Nothing is persisted on purpose: it only holds markers
-and counters that expire within minutes.
+port mapping in `compose.yaml` to `"127.0.0.1:6379:6379"`. Nothing is persisted on purpose: it only holds duplicate
+markers and counters that expire within minutes, and sessions that expire after 2 idle hours. A restart of Redis
+simply sends customers back to the menu.
 
 ### 2. Prepare Magento
 
@@ -131,8 +155,16 @@ Check `http://localhost:8080/actuator/health`. It should report `UP`, which incl
 ./mvnw clean test
 ```
 
-13 tests run: 12 unit tests for the conversation logic (no Spring, Redis or network) and a context-load test that
-starts the application with dummy property values, so it does not need your real secrets.
+38 tests run:
+
+- 26 unit tests for the conversation logic (verification, dedupe, rate limits, menu, taps, cart, sessions) using
+  hand-written fakes: no Spring, Redis or network;
+- 5 tests that parse Infobip-shaped JSON (text and list-tap payloads) into our own message type;
+- 1 test that the list message is serialised in the shape Infobip expects;
+- 5 tests for the session JSON (round trip, unknown fields, damaged data);
+- a context-load test that starts the application with dummy property values, so it does not need your real secrets.
+
+The Redis calls themselves are checked by hand (see "Inspect a session" below).
 
 ### Simulate an Infobip webhook
 
@@ -151,6 +183,19 @@ curl -i -X POST "http://localhost:8080/webhooks/whatsapp/<YOUR_WEBHOOK_SECRET>" 
   page flipping to *Verified*.
 - A wrong secret returns `401`.
 
+### Inspect a session
+
+After a verified customer has used the menu (add the Redis password option if your compose file sets one):
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'wa:session:*'
+docker compose exec redis redis-cli TTL wa:session:<digits>     # about 7200 right after an interaction
+docker compose exec redis redis-cli GET wa:session:<digits>     # {"state":"IDLE","cart":[]}
+```
+
+Session keys contain a phone number and the value will contain what the customer ordered, so do not paste them into
+tickets or chats.
+
 ## Receiving real WhatsApp messages
 
 Infobip has to reach your app over the internet, so on a laptop you need a tunnel (ngrok, Cloudflare Tunnel, etc.)
@@ -161,8 +206,10 @@ https://<tunnel-host>/webhooks/whatsapp/<WEBHOOK_SECRET>
 ```
 
 Menu names change, so follow Infobip's current WhatsApp "receive messages" documentation. The payload this service
-reads is the `results[]` array with `from`, `messageId` and `message.type = TEXT` / `message.text`. If Infobip's real
-payload differs, `InfobipInbound` is the only class to adjust. In testing, the real payload matched.
+reads is the `results[]` array with `from`, `messageId` and `message`, of type `TEXT` (`message.text`) or
+`INTERACTIVE_LIST_REPLY` (`message.id` is the tapped row's id, `message.title` its title). Other types are ignored. If
+Infobip's real payload differs, `InfobipInbound` is the only class to adjust. In testing, the real payloads matched.
+The console line `Webhook received: N result(s), M message(s)` counts what arrived and what was understood.
 
 A quick tunnel is the easiest way to test:
 
@@ -188,7 +235,12 @@ not describe this; a registered production sender is expected not to need it.
 |---|---|
 | `VERIFY 482913` (case, a colon, spaces and a trailing full stop are tolerated; exactly 6 digits) | Calls Magento. Success: "Thank you ..., your number is verified." Anything else: one generic "invalid or expired" message. |
 | Anything else, number not verified or unknown | One "please verify your number" reply per minute per number, with a link to the store |
-| Anything else, number verified | Personal greeting (placeholder for the menu) |
+| Anything else, number verified | The main menu (list message), with the customer's first name |
+| Tap on **Help** | A short explanation of how ordering works |
+| Tap on **View cart** | The cart, or "Your cart is empty" |
+| Tap on any other row | "<Option> is not ready yet, we are still building it. Send any message to see the menu again." |
+| Tap on an unknown row id | The menu again |
+| Tap from a number that is not verified | The "please verify your number" reply (once a minute) |
 | Anything while Magento is unreachable | "We are having trouble right now, please try again in a few minutes" |
 | More than 20 messages a minute from one number | Ignored |
 
@@ -199,10 +251,12 @@ src/main/java/com/alex/chatcommercebot
 ├── ChatCommerceBotApplication.java
 ├── config/          AppProperties (validated settings), AppConfig, REST client setup
 ├── conversation/    Business logic. No Spring imports, so it is unit tested on its own:
-│                    ConversationService, Messages, Redact, and the interfaces it depends on
+│                    ConversationService, Messages, Redact, Menu / MenuAction / ListMessage,
+│                    Session / CartLine, and the interfaces it depends on
+│                    (MagentoGateway, MessageSender, KeyValueStore, SessionStore)
 ├── infobip/         WebhookController (secret check, ack, hand-off), inbound payload, message sender
 ├── magento/         MagentoRestGateway (verify and lookup calls)
-└── store/           RedisKeyValueStore (atomic dedupe marker and counter)
+└── store/           RedisKeyValueStore (atomic dedupe marker and counter), RedisSessionStore, SessionCodec
 ```
 
 ## Design notes
@@ -217,6 +271,12 @@ src/main/java/com/alex/chatcommercebot
   are not logged because they can echo customer data.
 - **Failure behaviour.** Any Magento failure (network, TLS, HTTP error) becomes one exception type and one polite
   message to the customer; replies to Infobip failing are logged and never crash the worker.
+- **Unexpected errors are logged, not lost.** The work is handed to an executor with `submit`, which keeps exceptions
+  inside a `Future` nobody reads. `WebhookController` therefore catches them and logs them with the message id.
+- **Menu limits are checked in code.** `ListMessage` rejects values WhatsApp would refuse (button 20 characters, row title
+  24, description 72, at most 10 rows), so a mistake fails in a test instead of as a rejected message.
+- **Sessions are disposable.** Unreadable or expired session data is replaced by an empty session. Losing a session
+  costs the customer only a trip back to the menu.
 
 ## Troubleshooting
 
@@ -229,6 +289,9 @@ src/main/java/com/alex/chatcommercebot
 | `Magento answered HTTP 401` | Wrong token, Integration not activated, its two Phone Verification permissions not ticked, or integration tokens not allowed as bearer tokens in Magento (see the module README). |
 | `Magento answered HTTP 404` | Wrong `MAGENTO_BASE_URL`, or the module is not enabled. |
 | Webhook returns `200` but nothing happens | The `messageId` was already used. Use a new one. |
+| The menu arrives but tapping a row does nothing, console says `0 text message(s)` | The app is still an older build that only reads text. Rebuild and restart. |
+| `Infobip rejected a message (HTTP 400)` right after sending the menu | The list was refused. Check the row titles and descriptions against the limits in `ListMessage`. |
+| App fails at startup with a missing `SessionStore` bean | `AppConfig` was not updated to pass the `SessionStore` to `ConversationService`. |
 | Messages from your phone never arrive, nothing in the console | The sandbox has not linked your phone yet. Send your Infobip account keyword once. |
 | `HttpTimeoutException: Request cancelled` right after a Magento cache flush or module update | Magento was cold and took longer than 10 s. Retry; if it persists, time the call with curl and raise `app.magento.timeout`. |
 | Verification always "invalid or expired" | The code expired (10 minutes), was already used, or the `from` number differs from the one entered on the website. |
@@ -237,7 +300,11 @@ src/main/java/com/alex/chatcommercebot
 
 ## Known limits
 
-- Only plain text messages are read. List and button replies arrive with the menu phase.
+- Understood: typed text and taps on list rows. Images, locations, reactions and reply-button taps are ignored.
+- Two messages from the same number processed at the same moment are not yet serialised, so they could overwrite each
+  other's session changes. This does not matter while sessions are never modified; a per-customer lock comes before the
+  cart is filled.
+- Most menu rows are placeholders; the cart cannot be filled yet.
 - Processing is in-process: a message accepted while the JVM crashes is lost (Infobip already got its `200`).
   A durable queue (RabbitMQ) is the fix when that matters.
 - The webhook secret lives in the URL path, so keep that URL out of shared logs and screenshots. Prefer a header or
@@ -246,7 +313,11 @@ src/main/java/com/alex/chatcommercebot
 
 ## Roadmap
 
-1. Interactive menu (list message): order again, browse categories, search, enter SKUs, cart.
-2. Cash-on-delivery checkout through a single transactional Magento endpoint.
-3. Order status messages (approved templates are needed outside the 24-hour window).
-4. RabbitMQ for durable processing, Docker image next to Warden, and a provider interface so Twilio can be added.
+1. ~~Interactive menu (list message) and session~~ **Done.**
+2. A per-customer lock, then the conversation state machine (entering items, awaiting confirmation).
+3. Magento endpoints for categories, product search and frequent products; wire up browse, search, SKU entry and
+   order again.
+4. Cash-on-delivery checkout through a single transactional Magento endpoint, with a maximum order value and an
+   explicit confirm step.
+5. Order status messages (approved templates are needed outside the 24-hour window).
+6. RabbitMQ for durable processing, Docker image next to Warden, and a provider interface so Twilio can be added.

@@ -3,10 +3,7 @@ package com.alex.chatcommercebot.config;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import com.alex.chatcommercebot.conversation.ConversationService;
-import com.alex.chatcommercebot.conversation.KeyValueStore;
-import com.alex.chatcommercebot.conversation.MagentoGateway;
-import com.alex.chatcommercebot.conversation.MessageSender;
+import com.alex.chatcommercebot.conversation.*;
 
 
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -25,8 +22,8 @@ class AppConfig {
 
     @Bean
     ConversationService conversationService(MagentoGateway magento, MessageSender sender,
-                                            KeyValueStore store, AppProperties props) {
-        return new ConversationService(magento, sender, store,
+                                            KeyValueStore store, SessionStore sessions, AppProperties props) {
+        return new ConversationService(magento, sender, store, sessions,
                 new ConversationService.Settings(props.storefrontUrl(), props.limits().messagesPerMinute()));
     }
 }

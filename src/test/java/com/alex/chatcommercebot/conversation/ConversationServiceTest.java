@@ -79,12 +79,34 @@ class ConversationServiceTest {
         }
     }
 
+    static class InMemorySessions implements SessionStore {
+        final Map<String, Session> data = new HashMap<>();
+        int saves;
+
+        @Override
+        public Session load(String phone) {
+            return data.getOrDefault(phone, Session.empty());
+        }
+
+        @Override
+        public void save(String phone, Session session) {
+            saves++;
+            data.put(phone, session);
+        }
+
+        @Override
+        public void clear(String phone) {
+            data.remove(phone);
+        }
+    }
+
     private final FakeMagento magento = new FakeMagento();
     private final RecordingSender sender = new RecordingSender();
     private final InMemoryStore store = new InMemoryStore();
+    private final InMemorySessions sessions = new InMemorySessions();
 
     private ConversationService service(int messagesPerMinute) {
-        return new ConversationService(magento, sender, store,
+        return new ConversationService(magento, sender, store, sessions,
                 new ConversationService.Settings("https://shop.example/", messagesPerMinute));
     }
 
@@ -211,6 +233,57 @@ class ConversationServiceTest {
         service.handle(tap("same", PHONE, MenuAction.HELP.id()));
 
         assertEquals(1, sender.sent.size());
+    }
+
+    @Test
+    void anEmptyCartIsReportedAsEmpty() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+
+        service(20).handle(tap("t1", PHONE, MenuAction.VIEW_CART.id()));
+
+        assertTrue(sender.last().contains("Your cart is empty"));
+    }
+
+    @Test
+    void aCartWithItemsIsListed() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        sessions.data.put(PHONE, new Session(Session.State.IDLE,
+                List.of(new CartLine("SKU-1", 2), new CartLine("SKU-2", 5))));
+
+        service(20).handle(tap("t1", PHONE, MenuAction.VIEW_CART.id()));
+
+        assertTrue(sender.last().contains("SKU-1 × 2"));
+        assertTrue(sender.last().contains("SKU-2 × 5"));
+    }
+
+    @Test
+    void aVerifiedCustomersSessionIsSavedSoItsTimerRestarts() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        ConversationService service = service(20);
+
+        service.handle(msg("m1", PHONE, "hi"));
+        service.handle(tap("t1", PHONE, MenuAction.HELP.id()));
+
+        assertEquals(2, sessions.saves);
+        assertTrue(sessions.data.containsKey(PHONE));
+    }
+
+    @Test
+    void strangersNeverGetASession() {
+        service(20).handle(msg("m1", PHONE, "hi"));
+        magento.lookupResult = new MagentoGateway.LookupResult(true, false, "Thabo");
+        service(20).handle(tap("t1", "27820000009", MenuAction.HELP.id()));
+
+        assertEquals(0, sessions.saves);
+        assertTrue(sessions.data.isEmpty());
+    }
+
+    @Test
+    void cartLineAndSessionRejectNonsense() {
+        assertThrows(IllegalArgumentException.class, () -> new CartLine(" ", 1));
+        assertThrows(IllegalArgumentException.class, () -> new CartLine("SKU-1", 0));
+        assertTrue(Session.empty().isCartEmpty());
+        assertEquals(Session.State.IDLE, new Session(null, null).state());
     }
 
     @Test

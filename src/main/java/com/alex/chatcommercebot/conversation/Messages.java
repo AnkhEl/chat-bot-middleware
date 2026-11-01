@@ -25,6 +25,17 @@ final class Messages {
                 + "You can now message us here to order.";
     }
 
+    static String cart(Session session) {
+        if (session.isCartEmpty()) {
+            return "🛒 Your cart is empty.\n\nSend any message to open the menu and start adding items.";
+        }
+        StringBuilder text = new StringBuilder("🛒 Your cart:\n");
+        for (CartLine line : session.cart()) {
+            text.append("\n• ").append(line.sku()).append(" × ").append(line.quantity());
+        }
+        return text.toString();
+    }
+
     /** Placeholder reply until a menu option is built. */
     static String comingSoon(String feature) {
         return "\"" + feature + "\" is not ready yet, we are still building it. "
