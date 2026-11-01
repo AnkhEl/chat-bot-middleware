@@ -147,6 +147,79 @@ class ConversationServiceTest {
         assertThrows(IllegalArgumentException.class, () -> new ListMessage.Row("a", "T", "x".repeat(73)));
     }
 
+    private static InboundMessage tap(String id, String from, String rowId) {
+        return new InboundMessage(id, from, "ignored title", rowId);
+    }
+
+    @Test
+    void tappingHelpSendsTheHelpText() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+
+        service(20).handle(tap("t1", PHONE, MenuAction.HELP.id()));
+
+        assertEquals(PHONE + "|" + Messages.HELP, sender.last());
+    }
+
+    @Test
+    void tappingARowThatIsNotBuiltYetSaysSoByName() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+
+        service(20).handle(tap("t1", PHONE, MenuAction.BROWSE.id()));
+
+        assertTrue(sender.last().contains("\"Browse categories\" is not ready yet"));
+    }
+
+    @Test
+    void everyMenuRowIsHandled() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        ConversationService service = service(100);
+
+        int i = 0;
+        for (MenuAction action : MenuAction.values()) {
+            service.handle(tap("t" + i++, PHONE, action.id()));
+        }
+
+        assertEquals(MenuAction.values().length, sender.sent.size());
+        assertTrue(sender.lists.isEmpty());
+    }
+
+    @Test
+    void anUnknownRowIdShowsTheMenuAgain() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+
+        service(20).handle(tap("t1", PHONE, "some_old_row"));
+
+        assertEquals(1, sender.lists.size());
+    }
+
+    @Test
+    void aTapFromAnUnverifiedNumberIsTreatedLikeAStranger() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, false, "Thabo");
+
+        service(20).handle(tap("t1", PHONE, MenuAction.HELP.id()));
+
+        assertTrue(sender.last().contains("don't recognise this number"));
+        assertTrue(sender.lists.isEmpty());
+    }
+
+    @Test
+    void theSameTapDeliveredTwiceIsHandledOnce() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        ConversationService service = service(20);
+
+        service.handle(tap("same", PHONE, MenuAction.HELP.id()));
+        service.handle(tap("same", PHONE, MenuAction.HELP.id()));
+
+        assertEquals(1, sender.sent.size());
+    }
+
+    @Test
+    void menuActionLookupById() {
+        assertEquals(MenuAction.SEARCH, MenuAction.fromId("menu_search").orElseThrow());
+        assertTrue(MenuAction.fromId("nope").isEmpty());
+        assertTrue(MenuAction.fromId(null).isEmpty());
+    }
+
     @Test
     void correctVerifyCodeConfirmsAndSendsDigitsOnlyToMagento() {
         magento.verifyResult = new MagentoGateway.VerifyResult(true, "Thabo");

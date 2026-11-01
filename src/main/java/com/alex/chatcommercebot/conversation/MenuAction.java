@@ -1,5 +1,8 @@
 package com.alex.chatcommercebot.conversation;
 
+import java.util.Arrays;
+import java.util.Optional;
+
 /** The rows of the main menu. The id is what WhatsApp sends back when the customer taps the row. */
 public enum MenuAction {
 
@@ -18,6 +21,11 @@ public enum MenuAction {
         this.id = id;
         this.title = title;
         this.description = description;
+    }
+
+    /** The row with this id, or empty if the id is not one of ours (old menu, tampering). */
+    public static Optional<MenuAction> fromId(String id) {
+        return Arrays.stream(values()).filter(a -> a.id.equals(id)).findFirst();
     }
 
     public String id() {

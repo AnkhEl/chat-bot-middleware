@@ -1,6 +1,7 @@
 package com.alex.chatcommercebot.conversation;
 
 import java.time.Duration;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -11,7 +12,7 @@ import org.slf4j.LoggerFactory;
  * Handles one inbound customer message.
  *
  * <p>Scope so far: phone verification ("VERIFY 482913"), the verified / not-verified gate, and the
- * main menu shown to verified customers.
+ * main menu shown to verified customers, and taps on the menu rows.
  *
  * <p>This class deliberately has no Spring imports, so it is unit-tested without a container.
  * It is safe to call twice with the same message id: the second call is ignored.
@@ -73,7 +74,9 @@ public final class ConversationService {
         Matcher verify = VERIFY.matcher(text);
 
         try {
-            if (verify.matches()) {
+            if (message.isReply()) {
+                handleReply(phone, message.replyId());
+            } else if (verify.matches()) {
                 handleVerify(phone, verify.group(1));
             } else {
                 handleOther(phone);
@@ -98,6 +101,40 @@ public final class ConversationService {
     }
 
     private void handleOther(String phone) {
+        MagentoGateway.LookupResult customer = verifiedCustomer(phone);
+        if (customer != null) {
+            sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+        }
+    }
+
+    /** The customer tapped a row of the menu. */
+    private void handleReply(String phone, String replyId) {
+        MagentoGateway.LookupResult customer = verifiedCustomer(phone);
+        if (customer == null) {
+            return;
+        }
+
+        Optional<MenuAction> action = MenuAction.fromId(replyId);
+        if (action.isEmpty()) {
+            // Not one of our rows (an old menu, or a forged message): just show the menu again.
+            log.info("Unknown menu reply from {}", Redact.phone(phone));
+            sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+            return;
+        }
+
+        log.info("Menu choice {} from {}", action.get(), Redact.phone(phone));
+        switch (action.get()) {
+            case HELP -> sender.sendText(phone, Messages.HELP);
+            // The other rows are built in the next steps.
+            default -> sender.sendText(phone, Messages.comingSoon(action.get().title()));
+        }
+    }
+
+    /**
+     * The customer for this number if it is verified. Otherwise the stranger gets at most one
+     * "please verify" reply a minute and this returns null.
+     */
+    private MagentoGateway.LookupResult verifiedCustomer(String phone) {
         MagentoGateway.LookupResult customer = magento.lookup(phone);
 
         if (!customer.found() || !customer.phoneVerified()) {
@@ -105,10 +142,9 @@ public final class ConversationService {
             if (store.markFirstSeen("wa:unknown:" + phone, UNKNOWN_REPLY_COOLDOWN)) {
                 sender.sendText(phone, Messages.notVerified(settings.storefrontUrl()));
             }
-            return;
+            return null;
         }
-
-        sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+        return customer;
     }
 
     private static boolean isBlank(String value) {

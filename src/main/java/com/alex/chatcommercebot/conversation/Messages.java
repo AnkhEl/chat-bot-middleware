@@ -10,12 +10,25 @@ final class Messages {
     static final String TEMPORARY_PROBLEM =
             "Sorry, we are having trouble right now. Please try again in a few minutes.";
 
+    static final String HELP =
+            "Here is how ordering on WhatsApp works:\n\n"
+                    + "• Send any message to see the menu.\n"
+                    + "• Pick what you want to do from the list.\n"
+                    + "• You always confirm before an order is placed.\n\n"
+                    + "Ordering is being switched on step by step, so some options are not ready yet.";
+
     private Messages() {
     }
 
     static String verified(String firstName) {
         return "✅ Thank you" + nameSuffix(firstName) + ", your number is verified.\n\n"
                 + "You can now message us here to order.";
+    }
+
+    /** Placeholder reply until a menu option is built. */
+    static String comingSoon(String feature) {
+        return "\"" + feature + "\" is not ready yet, we are still building it. "
+                + "Send any message to see the menu again.";
     }
 
     static String notVerified(String storefrontUrl) {

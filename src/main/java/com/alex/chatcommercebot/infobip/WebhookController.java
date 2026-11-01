@@ -52,7 +52,7 @@ public class WebhookController {
 
         int received = body.results() == null ? 0 : body.results().size();
         List<InboundMessage> messages = body.toInboundMessages();
-        log.info("Webhook received: {} result(s), {} text message(s)", received, messages.size());
+        log.info("Webhook received: {} result(s), {} message(s)", received, messages.size());
 
         for (InboundMessage message : messages) {
             executor.submit(() -> handleSafely(message));
@@ -64,7 +64,8 @@ public class WebhookController {
         try {
             conversations.handle(message);
         } catch (RuntimeException e) {
-            // Never lets one bad message take down the worker; the stack trace has no customer data.
+            // submit() stores exceptions in the returned Future, where nobody reads them.
+            // Catching here makes sure an unexpected failure is logged instead of vanishing.
             log.error("Failed to handle message {}", message.messageId(), e);
         }
     }
