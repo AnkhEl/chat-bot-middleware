@@ -67,6 +67,8 @@ class ConversationServiceTest {
 
     static class InMemoryStore implements KeyValueStore {
         final Map<String, Long> counters = new HashMap<>();
+        final Map<String, String> locks = new HashMap<>();
+        boolean lockAlwaysBusy;
 
         @Override
         public boolean markFirstSeen(String key, Duration ttl) {
@@ -76,6 +78,20 @@ class ConversationServiceTest {
         @Override
         public long increment(String key, Duration ttl) {
             return counters.merge(key, 1L, Long::sum);
+        }
+
+        @Override
+        public java.util.Optional<String> tryLock(String key, Duration ttl) {
+            if (lockAlwaysBusy || locks.containsKey(key)) {
+                return java.util.Optional.empty();
+            }
+            locks.put(key, "token-" + locks.size());
+            return java.util.Optional.of(locks.get(key));
+        }
+
+        @Override
+        public void unlock(String key, String token) {
+            locks.remove(key, token);
         }
     }
 
@@ -284,6 +300,40 @@ class ConversationServiceTest {
         assertThrows(IllegalArgumentException.class, () -> new CartLine("SKU-1", 0));
         assertTrue(Session.empty().isCartEmpty());
         assertEquals(Session.State.IDLE, new Session(null, null).state());
+    }
+
+    @Test
+    void theCustomerLockIsReleasedAfterEveryMessage() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        ConversationService service = service(20);
+
+        service.handle(msg("m1", PHONE, "hi"));
+        service.handle(tap("t1", PHONE, MenuAction.HELP.id()));
+
+        assertTrue(store.locks.isEmpty());
+    }
+
+    @Test
+    void theLockIsReleasedEvenWhenMagentoFails() {
+        magento.down = true;
+
+        service(20).handle(msg("m1", PHONE, "hi"));
+
+        assertTrue(store.locks.isEmpty());
+    }
+
+    @Test
+    void aMessageIsDroppedWhenTheCustomerStaysBusy() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+        store.lockAlwaysBusy = true;
+        ConversationService impatient = new ConversationService(magento, sender, store, sessions,
+                new ConversationService.Settings("https://shop.example/", 20),
+                new CustomerLock(store, Duration.ofMillis(20), Duration.ofMillis(1)));
+
+        impatient.handle(msg("m1", PHONE, "hi"));
+
+        assertTrue(sender.sent.isEmpty());
+        assertEquals(0, magento.lookupCalls);
     }
 
     @Test

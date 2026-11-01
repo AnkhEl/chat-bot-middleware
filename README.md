@@ -59,6 +59,7 @@ session.
 | Real inbound messages from Infobip to this app | Working (tested on the Infobip sandbox through a Cloudflare tunnel; see below) |
 | Interactive menu (list message) and tap handling | Working (tested with real WhatsApp messages) |
 | Per-customer session in Redis (state, cart, 2 h idle expiry) | Working. The cart is always empty until the next steps |
+| Per-customer lock (one message per customer at a time) | Working |
 | Help and View cart menu rows | Working |
 | Order again, browse, search, SKU entry | Placeholder replies ("not ready yet") |
 | Cart filling, checkout | Not built |
@@ -83,7 +84,7 @@ docker compose exec redis redis-cli ping    # expect PONG
 
 Redis here has no password, so keep it reachable from your own machine only. If you are on shared Wi-Fi, change the
 port mapping in `compose.yaml` to `"127.0.0.1:6379:6379"`. Nothing is persisted on purpose: it only holds duplicate
-markers and counters that expire within minutes, and sessions that expire after 2 idle hours. A restart of Redis
+markers, counters and locks that expire within minutes, and sessions that expire after 2 idle hours. A restart of Redis
 simply sends customers back to the menu.
 
 ### 2. Prepare Magento
@@ -155,10 +156,12 @@ Check `http://localhost:8080/actuator/health`. It should report `UP`, which incl
 ./mvnw clean test
 ```
 
-38 tests run:
+47 tests run:
 
-- 26 unit tests for the conversation logic (verification, dedupe, rate limits, menu, taps, cart, sessions) using
-  hand-written fakes: no Spring, Redis or network;
+- 29 unit tests for the conversation logic (verification, dedupe, rate limits, menu, taps, cart, sessions, locking)
+  using hand-written fakes: no Spring, Redis or network;
+- 6 tests for the per-customer lock, including one that runs 12 tasks for the same customer on concurrent threads and
+  checks that never more than one runs at a time;
 - 5 tests that parse Infobip-shaped JSON (text and list-tap payloads) into our own message type;
 - 1 test that the list message is serialised in the shape Infobip expects;
 - 5 tests for the session JSON (round trip, unknown fields, damaged data);
@@ -191,6 +194,7 @@ After a verified customer has used the menu (add the Redis password option if yo
 docker compose exec redis redis-cli --scan --pattern 'wa:session:*'
 docker compose exec redis redis-cli TTL wa:session:<digits>     # about 7200 right after an interaction
 docker compose exec redis redis-cli GET wa:session:<digits>     # {"state":"IDLE","cart":[]}
+docker compose exec redis redis-cli --scan --pattern 'wa:lock:*' # normally empty: locks last only while a message is processed
 ```
 
 Session keys contain a phone number and the value will contain what the customer ordered, so do not paste them into
@@ -251,12 +255,12 @@ src/main/java/com/alex/chatcommercebot
 ├── ChatCommerceBotApplication.java
 ├── config/          AppProperties (validated settings), AppConfig, REST client setup
 ├── conversation/    Business logic. No Spring imports, so it is unit tested on its own:
-│                    ConversationService, Messages, Redact, Menu / MenuAction / ListMessage,
+│                    ConversationService, CustomerLock, Messages, Redact, Menu / MenuAction / ListMessage,
 │                    Session / CartLine, and the interfaces it depends on
 │                    (MagentoGateway, MessageSender, KeyValueStore, SessionStore)
 ├── infobip/         WebhookController (secret check, ack, hand-off), inbound payload, message sender
 ├── magento/         MagentoRestGateway (verify and lookup calls)
-└── store/           RedisKeyValueStore (atomic dedupe marker and counter), RedisSessionStore, SessionCodec
+└── store/           RedisKeyValueStore (atomic dedupe marker, counter and lock), RedisSessionStore, SessionCodec
 ```
 
 ## Design notes
@@ -275,6 +279,11 @@ src/main/java/com/alex/chatcommercebot
   inside a `Future` nobody reads. `WebhookController` therefore catches them and logs them with the message id.
 - **Menu limits are checked in code.** `ListMessage` rejects values WhatsApp would refuse (button 20 characters, row title
   24, description 72, at most 10 rows), so a mistake fails in a test instead of as a rejected message.
+- **One message per customer at a time.** Each message runs on its own thread, so `CustomerLock` takes a Redis lock
+  (`wa:lock:<number>`, `SET NX` with a random token, released with a compare-and-delete script) around the whole
+  message. Quick taps from one phone then take turns instead of overwriting each other's session. The lock frees itself
+  after 30 seconds if the app crashes, and a message that cannot get the lock within 10 seconds is dropped with a
+  warning.
 - **Sessions are disposable.** Unreadable or expired session data is replaced by an empty session. Losing a session
   costs the customer only a trip back to the menu.
 
@@ -296,14 +305,14 @@ src/main/java/com/alex/chatcommercebot
 | `HttpTimeoutException: Request cancelled` right after a Magento cache flush or module update | Magento was cold and took longer than 10 s. Retry; if it persists, time the call with curl and raise `app.magento.timeout`. |
 | Verification always "invalid or expired" | The code expired (10 minutes), was already used, or the `from` number differs from the one entered on the website. |
 | `Infobip rejected a message (HTTP n)` | Check the API key, base URL and sender. On a trial, the recipient must be a verified test number. |
+| `Customer *******1234 was busy for too long; message dropped` | A previous message from that customer took over 10 seconds (usually a slow Magento). The message is lost; ask the customer to send it again. A stuck lock frees itself after 30 seconds. |
 | `Could not reach Infobip` | Network or TLS problem towards Infobip. If you set the Windows trust-store options, make sure the Windows certificate list is intact. |
 
 ## Known limits
 
 - Understood: typed text and taps on list rows. Images, locations, reactions and reply-button taps are ignored.
-- Two messages from the same number processed at the same moment are not yet serialised, so they could overwrite each
-  other's session changes. This does not matter while sessions are never modified; a per-customer lock comes before the
-  cart is filled.
+- Messages from one customer take turns (Redis lock), but waiting messages poll for it, so strict arrival order is not
+  guaranteed, and a message that waits more than 10 seconds is dropped. This is a lock, not a queue.
 - Most menu rows are placeholders; the cart cannot be filled yet.
 - Processing is in-process: a message accepted while the JVM crashes is lost (Infobip already got its `200`).
   A durable queue (RabbitMQ) is the fix when that matters.
@@ -314,7 +323,7 @@ src/main/java/com/alex/chatcommercebot
 ## Roadmap
 
 1. ~~Interactive menu (list message) and session~~ **Done.**
-2. A per-customer lock, then the conversation state machine (entering items, awaiting confirmation).
+2. ~~A per-customer lock~~ **Done.** Then the conversation state machine (entering items, awaiting confirmation).
 3. Magento endpoints for categories, product search and frequent products; wire up browse, search, SKU entry and
    order again.
 4. Cash-on-delivery checkout through a single transactional Magento endpoint, with a maximum order value and an

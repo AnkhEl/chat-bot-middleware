@@ -41,14 +41,23 @@ public final class ConversationService {
     private final KeyValueStore store;
     private final SessionStore sessions;
     private final Settings settings;
+    private final CustomerLock lock;
 
     public ConversationService(MagentoGateway magento, MessageSender sender, KeyValueStore store,
                                SessionStore sessions, Settings settings) {
+        this(magento, sender, store, sessions, settings,
+                new CustomerLock(store, Duration.ofSeconds(10), Duration.ofMillis(50)));
+    }
+
+    /** For tests, which need a lock that gives up quickly. */
+    ConversationService(MagentoGateway magento, MessageSender sender, KeyValueStore store,
+                        SessionStore sessions, Settings settings, CustomerLock lock) {
         this.magento = magento;
         this.sender = sender;
         this.store = store;
         this.sessions = sessions;
         this.settings = settings;
+        this.lock = lock;
     }
 
     public void handle(InboundMessage message) {
@@ -73,6 +82,14 @@ public final class ConversationService {
             return;
         }
 
+        // One message per customer at a time, so quick taps cannot overwrite each other's session changes.
+        boolean ran = lock.run(phone, () -> process(phone, message));
+        if (!ran) {
+            log.warn("Customer {} was busy for too long; message dropped", Redact.phone(phone));
+        }
+    }
+
+    private void process(String phone, InboundMessage message) {
         String text = message.text() == null ? "" : message.text().trim();
         Matcher verify = VERIFY.matcher(text);
 
