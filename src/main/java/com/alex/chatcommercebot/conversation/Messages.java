@@ -1,5 +1,7 @@
 package com.alex.chatcommercebot.conversation;
 
+import java.util.List;
+
 /** Customer-facing texts in one place, so wording can change without touching the logic. */
 final class Messages {
 
@@ -16,6 +18,15 @@ final class Messages {
                     + "• Pick what you want to do from the list.\n"
                     + "• You always confirm before an order is placed.\n\n"
                     + "Ordering is being switched on step by step, so some options are not ready yet.";
+
+    static final String ENTER_ITEMS_PROMPT =
+            "🔢 Send the items you want, one per line: the product code, then the quantity.\n\n"
+                    + "SKU-123 x 2\n"
+                    + "SKU-456 x 1\n\n"
+                    + "Send MENU to go back.";
+
+    static final String TOO_MANY_ITEMS =
+            "That is a lot at once. Please send up to " + OrderLineParser.MAX_LINES + " items at a time.";
 
     private Messages() {
     }
@@ -34,6 +45,37 @@ final class Messages {
             text.append("\n• ").append(line.sku()).append(" × ").append(line.quantity());
         }
         return text.toString();
+    }
+
+    /** Echo of what was read from a list of typed items. Nothing is added to the cart yet. */
+    static String itemsRead(List<CartLine> lines, List<String> unreadable) {
+        StringBuilder text = new StringBuilder("I read:\n");
+        for (CartLine line : lines) {
+            text.append("\n• ").append(line.sku()).append(" × ").append(line.quantity());
+        }
+        if (!unreadable.isEmpty()) {
+            text.append("\n\nI could not read:");
+            for (String line : unreadable) {
+                text.append("\n• ").append(shorten(line));
+            }
+        }
+        text.append("\n\nChecking these against our products and adding them to your cart comes in the next step, ")
+                .append("so nothing has been added yet.\n\nSend more items, DONE to see your cart, or MENU to go back.");
+        return text.toString();
+    }
+
+    static String itemsNotUnderstood(List<String> unreadable) {
+        StringBuilder text = new StringBuilder("I could not read that:");
+        for (String line : unreadable) {
+            text.append("\n• ").append(shorten(line));
+        }
+        text.append("\n\nPlease send one item per line, the product code and then the quantity, like SKU-123 x 2. ")
+                .append("Send MENU to go back.");
+        return text.toString();
+    }
+
+    private static String shorten(String line) {
+        return line.length() <= 40 ? line : line.substring(0, 40) + "…";
     }
 
     /** Placeholder reply until a menu option is built. */

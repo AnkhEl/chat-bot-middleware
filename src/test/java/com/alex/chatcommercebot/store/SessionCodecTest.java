@@ -25,6 +25,13 @@ class SessionCodecTest {
     }
 
     @Test
+    void theItemEntryStateRoundTrips() {
+        Session original = new Session(Session.State.ENTERING_ITEMS, List.of());
+
+        assertEquals(original, codec.fromJson(codec.toJson(original)).orElseThrow());
+    }
+
+    @Test
     void anEmptySessionRoundTrips() {
         assertEquals(Session.empty(), codec.fromJson(codec.toJson(Session.empty())).orElseThrow());
     }

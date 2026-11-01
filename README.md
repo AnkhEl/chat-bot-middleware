@@ -8,8 +8,8 @@ and orders. This service only holds short-lived conversation state in Redis.
 
 **Today:** customers prove they own their phone number by sending a one-time code, and the bot recognises verified
 customers. A verified customer gets an interactive **menu** (a WhatsApp list), taps are understood, and each customer
-has a short-lived **session** in Redis (state and cart). **Next:** filling the cart (browse, search, SKU entry) and
-cash-on-delivery checkout.
+has a short-lived **session** in Redis (state and cart). Customers can also type product codes and quantities, which the bot reads back.
+**Next:** checking those against Magento and filling the cart, then cash-on-delivery checkout.
 
 ## How it fits together
 
@@ -38,9 +38,25 @@ A verified customer who sends anything receives a WhatsApp **list message** with
 Order again, Browse categories, Search products, Enter SKUs, View cart, Help.
 
 When the customer taps a row, Infobip sends a webhook whose message type is `INTERACTIVE_LIST_REPLY` carrying the
-row's id (for example `menu_help`). The bot looks the id up in the `MenuAction` enum and replies. Today **Help** and
-**View cart** are real; the other four say they are not ready yet. A tap from a number that is not verified is treated
+row's id (for example `menu_help`). The bot looks the id up in the `MenuAction` enum and replies. Today **Help**,
+**View cart** and **Enter SKUs** are real (Enter SKUs only reads what was typed so far); the other three say they are not
+ready yet. A tap from a number that is not verified is treated
 like any message from a stranger, and an id the bot does not know simply shows the menu again.
+
+### Entering items by SKU
+
+Tapping **Enter SKUs** puts the customer in the `ENTERING_ITEMS` state and asks for items, one per line (or separated by
+semicolons): a product code, then an optional quantity.
+
+```
+SKU-123 x 2        SKU-123 x2        SKU-123 2        SKU-123 *2        SKU-123 × 2        SKU-123  (quantity 1)
+```
+
+In this state typed text is read as items; in the idle state any text just opens the menu. The bot answers with what it
+read ("I read: • SKU-123 × 2 ..."), lists any line it could not read, and says that nothing has been added to the cart
+yet: checking a SKU is Magento's decision and that endpoint is the next step. Limits for now: 20 lines per message,
+quantity 1 to 999 per line. `MENU` or `CANCEL` returns to the menu, `DONE` shows the cart, and tapping any menu row also
+leaves item entry. `VERIFY ######` keeps working in every state.
 
 ### Sessions
 
@@ -156,15 +172,16 @@ Check `http://localhost:8080/actuator/health`. It should report `UP`, which incl
 ./mvnw clean test
 ```
 
-47 tests run:
+66 tests run:
 
-- 29 unit tests for the conversation logic (verification, dedupe, rate limits, menu, taps, cart, sessions, locking)
-  using hand-written fakes: no Spring, Redis or network;
+- 39 unit tests for the conversation logic (verification, dedupe, rate limits, menu, taps, cart, sessions, locking, item
+  entry states) using hand-written fakes: no Spring, Redis or network;
+- 8 tests for the item parser (quantity formats, SKUs ending in digits or containing an x, limits, unreadable lines);
 - 6 tests for the per-customer lock, including one that runs 12 tasks for the same customer on concurrent threads and
   checks that never more than one runs at a time;
 - 5 tests that parse Infobip-shaped JSON (text and list-tap payloads) into our own message type;
 - 1 test that the list message is serialised in the shape Infobip expects;
-- 5 tests for the session JSON (round trip, unknown fields, damaged data);
+- 6 tests for the session JSON (round trips, unknown fields, damaged data);
 - a context-load test that starts the application with dummy property values, so it does not need your real secrets.
 
 The Redis calls themselves are checked by hand (see "Inspect a session" below).
@@ -242,6 +259,10 @@ not describe this; a registered production sender is expected not to need it.
 | Anything else, number verified | The main menu (list message), with the customer's first name |
 | Tap on **Help** | A short explanation of how ordering works |
 | Tap on **View cart** | The cart, or "Your cart is empty" |
+| Tap on **Enter SKUs** | Asks for items (code and quantity, one per line) and switches to item entry |
+| Typed text while entering items | "I read: ..." with each item, any unreadable lines, and a note that nothing is in the cart yet |
+| `MENU` / `CANCEL` / `DONE` while entering items | The menu / the menu / the cart. All three leave item entry |
+| More than 20 lines at once | Asked to send fewer |
 | Tap on any other row | "<Option> is not ready yet, we are still building it. Send any message to see the menu again." |
 | Tap on an unknown row id | The menu again |
 | Tap from a number that is not verified | The "please verify your number" reply (once a minute) |
@@ -256,7 +277,7 @@ src/main/java/com/alex/chatcommercebot
 ├── config/          AppProperties (validated settings), AppConfig, REST client setup
 ├── conversation/    Business logic. No Spring imports, so it is unit tested on its own:
 │                    ConversationService, CustomerLock, Messages, Redact, Menu / MenuAction / ListMessage,
-│                    Session / CartLine, and the interfaces it depends on
+│                    Session / CartLine / OrderLineParser, and the interfaces it depends on
 │                    (MagentoGateway, MessageSender, KeyValueStore, SessionStore)
 ├── infobip/         WebhookController (secret check, ack, hand-off), inbound payload, message sender
 ├── magento/         MagentoRestGateway (verify and lookup calls)
@@ -284,6 +305,9 @@ src/main/java/com/alex/chatcommercebot
   message. Quick taps from one phone then take turns instead of overwriting each other's session. The lock frees itself
   after 30 seconds if the app crashes, and a message that cannot get the lock within 10 seconds is dropped with a
   warning.
+- **A plain state machine.** The session's `State` (`IDLE`, `ENTERING_ITEMS`) decides what the next message means.
+  `ConversationService` switches on it, and every handler returns the session to keep, which is then saved once. No
+  state-machine framework: the flow is small enough to read in one screen.
 - **Sessions are disposable.** Unreadable or expired session data is replaced by an empty session. Losing a session
   costs the customer only a trip back to the menu.
 
@@ -313,7 +337,8 @@ src/main/java/com/alex/chatcommercebot
 - Understood: typed text and taps on list rows. Images, locations, reactions and reply-button taps are ignored.
 - Messages from one customer take turns (Redis lock), but waiting messages poll for it, so strict arrival order is not
   guaranteed, and a message that waits more than 10 seconds is dropped. This is a lock, not a queue.
-- Most menu rows are placeholders; the cart cannot be filled yet.
+- Order again, Browse categories and Search products are placeholders. Typed items are read and echoed but not yet
+  checked against Magento or added to the cart.
 - Processing is in-process: a message accepted while the JVM crashes is lost (Infobip already got its `200`).
   A durable queue (RabbitMQ) is the fix when that matters.
 - The webhook secret lives in the URL path, so keep that URL out of shared logs and screenshots. Prefer a header or
@@ -323,9 +348,10 @@ src/main/java/com/alex/chatcommercebot
 ## Roadmap
 
 1. ~~Interactive menu (list message) and session~~ **Done.**
-2. ~~A per-customer lock~~ **Done.** Then the conversation state machine (entering items, awaiting confirmation).
-3. Magento endpoints for categories, product search and frequent products; wire up browse, search, SKU entry and
-   order again.
+2. ~~A per-customer lock~~ and ~~the conversation state machine~~ **Done** (item entry; the confirmation state arrives
+   with checkout).
+3. Magento endpoints: first SKU lookup (so typed items can be checked and added to the cart), then categories, product
+   search and frequent products; wire up browse, search and order again.
 4. Cash-on-delivery checkout through a single transactional Magento endpoint, with a maximum order value and an
    explicit confirm step.
 5. Order status messages (approved templates are needed outside the 24-hour window).

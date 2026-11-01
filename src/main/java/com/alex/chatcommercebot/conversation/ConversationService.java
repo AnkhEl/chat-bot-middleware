@@ -1,6 +1,7 @@
 package com.alex.chatcommercebot.conversation;
 
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -11,8 +12,11 @@ import org.slf4j.LoggerFactory;
 /**
  * Handles one inbound customer message.
  *
- * <p>Scope so far: phone verification ("VERIFY 482913"), the verified / not-verified gate, and the
- * main menu shown to verified customers, taps on the menu rows, and the per-customer session.
+ * <p>Scope so far: phone verification ("VERIFY 482913"), the verified / not-verified gate, the main menu,
+ * taps on its rows, a per-customer session, and the first conversation state (entering items by SKU).
+ *
+ * <p>The conversation is a plain state machine: the session's {@link Session.State} decides what the
+ * customer's next message means, and each handler returns the session to keep.
  *
  * <p>This class deliberately has no Spring imports, so it is unit-tested without a container.
  * It is safe to call twice with the same message id: the second call is ignored.
@@ -94,13 +98,23 @@ public final class ConversationService {
         Matcher verify = VERIFY.matcher(text);
 
         try {
-            if (message.isReply()) {
-                handleReply(phone, message.replyId());
-            } else if (verify.matches()) {
+            if (!message.isReply() && verify.matches()) {
                 handleVerify(phone, verify.group(1));
-            } else {
-                handleOther(phone);
+                return;
             }
+
+            MagentoGateway.LookupResult customer = verifiedCustomer(phone);
+            if (customer == null) {
+                return;
+            }
+
+            // What the customer's message means depends on the session: where they are and what they are doing.
+            // Each handler returns the session to keep; saving it also restarts the 2-hour idle timer.
+            Session session = sessions.load(phone);
+            Session next = message.isReply()
+                    ? handleReply(phone, customer, session, message.replyId())
+                    : handleText(phone, customer, session, text);
+            sessions.save(phone, next);
         } catch (MagentoUnavailableException e) {
             log.error("Magento unavailable while handling a message from {}: {}", Redact.phone(phone), e.getMessage());
             sender.sendText(phone, Messages.TEMPORARY_PROBLEM);
@@ -120,46 +134,78 @@ public final class ConversationService {
         }
     }
 
-    private void handleOther(String phone) {
-        MagentoGateway.LookupResult customer = verifiedCustomer(phone);
-        if (customer == null) {
-            return;
-        }
-        touchSession(phone);
-        sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+    /** The customer typed something (not a VERIFY code). */
+    private Session handleText(String phone, MagentoGateway.LookupResult customer, Session session, String text) {
+        return switch (session.state()) {
+            case ENTERING_ITEMS -> handleItemEntry(phone, customer, session, text);
+            case IDLE -> {
+                sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+                yield session;
+            }
+        };
     }
 
-    /** The customer tapped a row of the menu. */
-    private void handleReply(String phone, String replyId) {
-        MagentoGateway.LookupResult customer = verifiedCustomer(phone);
-        if (customer == null) {
-            return;
+    /** The customer is typing product codes and quantities. */
+    private Session handleItemEntry(String phone, MagentoGateway.LookupResult customer, Session session, String text) {
+        String word = text.replaceAll("[.!\\s]+$", "").toLowerCase(Locale.ROOT);
+        switch (word) {
+            case "menu", "cancel" -> {
+                sender.sendList(phone, Menu.forCustomer(customer.firstName()));
+                return session.withState(Session.State.IDLE);
+            }
+            case "done" -> {
+                sender.sendText(phone, Messages.cart(session));
+                return session.withState(Session.State.IDLE);
+            }
+            default -> {
+                // Not a command: read it as items.
+            }
         }
 
-        Session session = touchSession(phone);
+        OrderLineParser.Result parsed = OrderLineParser.parse(text);
+        if (parsed.tooMany()) {
+            sender.sendText(phone, Messages.TOO_MANY_ITEMS);
+        } else if (parsed.lines().isEmpty()) {
+            sender.sendText(phone, Messages.itemsNotUnderstood(parsed.unreadable()));
+        } else {
+            // Next step: check these SKUs with Magento and add them to the cart. For now just show what was read.
+            sender.sendText(phone, Messages.itemsRead(parsed.lines(), parsed.unreadable()));
+        }
+        return session;
+    }
+
+    /** The customer tapped a row of the menu. Tapping any row also ends item entry. */
+    private Session handleReply(String phone, MagentoGateway.LookupResult customer, Session session, String replyId) {
+        Session idle = session.withState(Session.State.IDLE);
 
         Optional<MenuAction> action = MenuAction.fromId(replyId);
         if (action.isEmpty()) {
             // Not one of our rows (an old menu, or a forged message): just show the menu again.
             log.info("Unknown menu reply from {}", Redact.phone(phone));
             sender.sendList(phone, Menu.forCustomer(customer.firstName()));
-            return;
+            return idle;
         }
 
         log.info("Menu choice {} from {}", action.get(), Redact.phone(phone));
-        switch (action.get()) {
-            case HELP -> sender.sendText(phone, Messages.HELP);
-            case VIEW_CART -> sender.sendText(phone, Messages.cart(session));
+        return switch (action.get()) {
+            case HELP -> {
+                sender.sendText(phone, Messages.HELP);
+                yield idle;
+            }
+            case VIEW_CART -> {
+                sender.sendText(phone, Messages.cart(session));
+                yield idle;
+            }
+            case ENTER_SKUS -> {
+                sender.sendText(phone, Messages.ENTER_ITEMS_PROMPT);
+                yield session.withState(Session.State.ENTERING_ITEMS);
+            }
             // The other rows are built in the next steps.
-            default -> sender.sendText(phone, Messages.comingSoon(action.get().title()));
-        }
-    }
-
-    /** Loads the customer's session and saves it straight back, which restarts its idle timer. */
-    private Session touchSession(String phone) {
-        Session session = sessions.load(phone);
-        sessions.save(phone, session);
-        return session;
+            default -> {
+                sender.sendText(phone, Messages.comingSoon(action.get().title()));
+                yield idle;
+            }
+        };
     }
 
     /**

@@ -19,14 +19,22 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record Session(State state, List<CartLine> cart) {
 
-    /** Where the customer is. More states (entering items, confirming) arrive with the steps that need them. */
+    /**
+     * Where the customer is. It decides what typed text means: in IDLE any text opens the menu, in ENTERING_ITEMS
+     * text is read as product codes and quantities. A state for confirming the order arrives with checkout.
+     */
     public enum State {
-        IDLE
+        IDLE,
+        ENTERING_ITEMS
     }
 
     public Session {
         state = state == null ? State.IDLE : state;
         cart = cart == null ? List.of() : List.copyOf(cart);
+    }
+
+    public Session withState(State newState) {
+        return new Session(newState, cart);
     }
 
     public static Session empty() {

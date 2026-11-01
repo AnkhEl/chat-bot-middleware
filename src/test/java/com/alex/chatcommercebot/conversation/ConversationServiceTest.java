@@ -336,6 +336,135 @@ class ConversationServiceTest {
         assertEquals(0, magento.lookupCalls);
     }
 
+    // ---- state machine -------------------------------------------------------------------------
+
+    private void verifiedCustomer() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
+    }
+
+    private void inItemEntry() {
+        sessions.data.put(PHONE, Session.empty().withState(Session.State.ENTERING_ITEMS));
+    }
+
+    @Test
+    void tappingEnterSkusAsksForItemsAndChangesState() {
+        verifiedCustomer();
+
+        service(20).handle(tap("t1", PHONE, MenuAction.ENTER_SKUS.id()));
+
+        assertEquals(PHONE + "|" + Messages.ENTER_ITEMS_PROMPT, sender.last());
+        assertEquals(Session.State.ENTERING_ITEMS, sessions.data.get(PHONE).state());
+    }
+
+    @Test
+    void typedItemsAreReadAndEchoedWhileEnteringItemsButTheCartIsNotChangedYet() {
+        verifiedCustomer();
+        inItemEntry();
+
+        service(20).handle(msg("m1", PHONE, "SKU-1 x 2\nSKU-2"));
+
+        assertTrue(sender.last().contains("SKU-1 × 2"));
+        assertTrue(sender.last().contains("SKU-2 × 1"));
+        assertTrue(sender.last().contains("nothing has been added yet"));
+        assertEquals(Session.State.ENTERING_ITEMS, sessions.data.get(PHONE).state());
+        assertTrue(sessions.data.get(PHONE).isCartEmpty());
+    }
+
+    @Test
+    void textThatIsNotItemsGetsAHelpfulReplyAndStaysInItemEntry() {
+        verifiedCustomer();
+        inItemEntry();
+
+        service(20).handle(msg("m1", PHONE, "I would like some tea please"));
+
+        assertTrue(sender.last().contains("I could not read that"));
+        assertEquals(Session.State.ENTERING_ITEMS, sessions.data.get(PHONE).state());
+    }
+
+    @Test
+    void menuAndCancelLeaveItemEntryAndShowTheMenu() {
+        verifiedCustomer();
+        ConversationService service = service(20);
+
+        inItemEntry();
+        service.handle(msg("m1", PHONE, "MENU"));
+        assertEquals(1, sender.lists.size());
+        assertEquals(Session.State.IDLE, sessions.data.get(PHONE).state());
+
+        inItemEntry();
+        service.handle(msg("m2", PHONE, " cancel. "));
+        assertEquals(2, sender.lists.size());
+        assertEquals(Session.State.IDLE, sessions.data.get(PHONE).state());
+    }
+
+    @Test
+    void doneShowsTheCartAndLeavesItemEntry() {
+        verifiedCustomer();
+        inItemEntry();
+
+        service(20).handle(msg("m1", PHONE, "done"));
+
+        assertTrue(sender.last().contains("Your cart is empty"));
+        assertEquals(Session.State.IDLE, sessions.data.get(PHONE).state());
+    }
+
+    @Test
+    void sameTextMeansDifferentThingsInDifferentStates() {
+        verifiedCustomer();
+        ConversationService service = service(20);
+
+        service.handle(msg("m1", PHONE, "SKU-1 x 2"));
+        assertEquals(1, sender.lists.size(), "idle: any text opens the menu");
+
+        inItemEntry();
+        service.handle(msg("m2", PHONE, "SKU-1 x 2"));
+        assertEquals(1, sender.lists.size(), "entering items: text is read as items");
+        assertTrue(sender.last().contains("I read:"));
+    }
+
+    @Test
+    void tappingAnyMenuRowEndsItemEntry() {
+        verifiedCustomer();
+        inItemEntry();
+
+        service(20).handle(tap("t1", PHONE, MenuAction.HELP.id()));
+
+        assertEquals(Session.State.IDLE, sessions.data.get(PHONE).state());
+    }
+
+    @Test
+    void tooManyItemsAtOnceAreRefused() {
+        verifiedCustomer();
+        inItemEntry();
+        String text = String.join("\n", java.util.Collections.nCopies(OrderLineParser.MAX_LINES + 1, "A-1"));
+
+        service(20).handle(msg("m1", PHONE, text));
+
+        assertEquals(PHONE + "|" + Messages.TOO_MANY_ITEMS, sender.last());
+    }
+
+    @Test
+    void aVerifyCodeStillWorksWhileEnteringItems() {
+        verifiedCustomer();
+        inItemEntry();
+        magento.verifyResult = new MagentoGateway.VerifyResult(true, "Thabo");
+
+        service(20).handle(msg("m1", PHONE, "VERIFY 482913"));
+
+        assertEquals(List.of(PHONE + "/482913"), magento.verifyCalls);
+    }
+
+    @Test
+    void anUnverifiedNumberCannotEnterItems() {
+        magento.lookupResult = new MagentoGateway.LookupResult(true, false, "Thabo");
+        inItemEntry();
+
+        service(20).handle(msg("m1", PHONE, "SKU-1 x 2"));
+
+        assertTrue(sender.last().contains("don't recognise this number"));
+        assertEquals(0, sessions.saves);
+    }
+
     @Test
     void menuActionLookupById() {
         assertEquals(MenuAction.SEARCH, MenuAction.fromId("menu_search").orElseThrow());
