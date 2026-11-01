@@ -1,6 +1,7 @@
 package com.alex.chatcommercebot.conversation;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -19,8 +20,8 @@ class ConversationServiceTest {
     // ---- fakes ---------------------------------------------------------------------------------
 
     static class FakeMagento implements MagentoGateway {
-        MagentoGateway.VerifyResult verifyResult = new MagentoGateway.VerifyResult(false, null);
-        MagentoGateway.LookupResult lookupResult = MagentoGateway.LookupResult.notFound();
+        VerifyResult verifyResult = new VerifyResult(false, null);
+        LookupResult lookupResult = LookupResult.notFound();
         boolean down;
         final List<String> verifyCalls = new ArrayList<>();
         int lookupCalls;
@@ -46,10 +47,17 @@ class ConversationServiceTest {
 
     static class RecordingSender implements MessageSender {
         final List<String> sent = new ArrayList<>();
+        final List<ListMessage> lists = new ArrayList<>();
 
         @Override
         public void sendText(String to, String text) {
             sent.add(to + "|" + text);
+        }
+
+        @Override
+        public void sendList(String to, ListMessage list) {
+            sent.add(to + "|[list] " + list.body());
+            lists.add(list);
         }
 
         String last() {
@@ -108,13 +116,35 @@ class ConversationServiceTest {
     }
 
     @Test
-    void verifiedNumberGetsPersonalGreeting() {
+    void verifiedNumberGetsTheMenuWithTheirName() {
         magento.lookupResult = new MagentoGateway.LookupResult(true, true, "Thabo");
 
         service(20).handle(msg("m1", "+27 82 123 4567", "hi"));
 
         assertEquals(1, sender.sent.size());
-        assertTrue(sender.last().startsWith(PHONE + "|Hi Thabo!"));
+        assertTrue(sender.last().startsWith(PHONE + "|[list] Hi Thabo!"));
+        ListMessage menu = sender.lists.get(0);
+        assertEquals(6, menu.rows().size());
+        assertEquals("menu_order_again", menu.rows().get(0).id());
+    }
+
+    @Test
+    void menuRowIdsAreUnique() {
+        long distinct = Menu.forCustomer(null).rows().stream().map(ListMessage.Row::id).distinct().count();
+
+        assertEquals(MenuAction.values().length, distinct);
+    }
+
+    @Test
+    void listMessageRejectsValuesWhatsAppWouldRefuse() {
+        ListMessage.Row ok = new ListMessage.Row("a", "A", null);
+
+        assertThrows(IllegalArgumentException.class, () -> new ListMessage("b", "x".repeat(21), "S", List.of(ok)));
+        assertThrows(IllegalArgumentException.class, () -> new ListMessage("b", "Open", "S", List.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ListMessage("b", "Open", "S", java.util.Collections.nCopies(11, ok)));
+        assertThrows(IllegalArgumentException.class, () -> new ListMessage.Row("a", "x".repeat(25), null));
+        assertThrows(IllegalArgumentException.class, () -> new ListMessage.Row("a", "T", "x".repeat(73)));
     }
 
     @Test

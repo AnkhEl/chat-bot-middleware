@@ -18,11 +18,6 @@ final class Messages {
                 + "You can now message us here to order.";
     }
 
-    static String greeting(String firstName) {
-        return "Hi" + nameSuffix(firstName) + "! Your number is verified ✅\n\n"
-                + "The ordering menu is coming soon.";
-    }
-
     static String notVerified(String storefrontUrl) {
         String base = storefrontUrl == null ? "" : storefrontUrl.replaceAll("/+$", "");
         return "Hi! We don't recognise this number yet.\n\n"

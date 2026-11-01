@@ -10,8 +10,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Handles one inbound customer message.
  *
- * <p>Step 3 scope: phone verification ("VERIFY 482913") and the verified / not-verified gate.
- * The ordering menu is added in the next step and will replace {@link #handleOther}'s greeting.
+ * <p>Scope so far: phone verification ("VERIFY 482913"), the verified / not-verified gate, and the
+ * main menu shown to verified customers.
  *
  * <p>This class deliberately has no Spring imports, so it is unit-tested without a container.
  * It is safe to call twice with the same message id: the second call is ignored.
@@ -108,8 +108,7 @@ public final class ConversationService {
             return;
         }
 
-        // Placeholder: the ordering menu replaces this in the next step.
-        sender.sendText(phone, Messages.greeting(customer.firstName()));
+        sender.sendList(phone, Menu.forCustomer(customer.firstName()));
     }
 
     private static boolean isBlank(String value) {
