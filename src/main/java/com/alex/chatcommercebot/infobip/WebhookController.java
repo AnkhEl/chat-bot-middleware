@@ -2,6 +2,7 @@ package com.alex.chatcommercebot.infobip;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import com.alex.chatcommercebot.config.AppProperties;
@@ -49,7 +50,11 @@ public class WebhookController {
             return ResponseEntity.status(401).build();
         }
 
-        for (InboundMessage message : body.toInboundMessages()) {
+        int received = body.results() == null ? 0 : body.results().size();
+        List<InboundMessage> messages = body.toInboundMessages();
+        log.info("Webhook received: {} result(s), {} text message(s)", received, messages.size());
+
+        for (InboundMessage message : messages) {
             executor.submit(() -> handleSafely(message));
         }
         return ResponseEntity.ok().build();
